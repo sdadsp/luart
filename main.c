@@ -223,9 +223,9 @@ int main(int argc, char *argv[]) {
     char rx_buf[MAX_BUFFER_SIZE + 1] = {0};
     unsigned long total_rx = 0;
     bool data_pending = false;
+    bool echo_armed = false;        /* CR or LF received, waiting for timeout */
     unsigned long last_char_time = 0;
     bool prompt_active = false;
-    bool skip_lf = false;
     bool running = true;
 
     while (running) {
@@ -251,41 +251,50 @@ int main(int argc, char *argv[]) {
             ssize_t n = read(fd, rx_buf + total_rx, MAX_BUFFER_SIZE - total_rx);
 
             if (n > 0) {
-                /* Skip lone LF after CR-triggered echo */
-                if (skip_lf) {
-                    skip_lf = false;
-                    if (rx_buf[total_rx] == '\n') {
-                        if (n > 1) {
-                            memmove(rx_buf + total_rx, rx_buf + total_rx + 1, n - 1);
-                        }
-                        n--;
-                    }
-                    if (n <= 0) continue;
-                }
-
-                /* Check for CR */
-                bool cr = false;
+                /* Check for CR or LF — arms the echo timer and displays immediately */
+                bool got_crlf = false;
                 for (ssize_t i = 0; i < n; i++) {
-                    if (rx_buf[total_rx + i] == '\r') { cr = true; break; }
+                    if (rx_buf[total_rx + i] == '\r' || rx_buf[total_rx + i] == '\n') {
+                        got_crlf = true;
+                        break;
+                    }
                 }
 
                 total_rx += (unsigned long)n;
                 data_pending = true;
                 last_char_time = get_tick_ms();
 
-                /* On CR or buffer full: display + echo immediately */
-                if (cr || total_rx >= MAX_BUFFER_SIZE) {
-                    /* Move to new line if prompt was showing */
+                /* CR/LF received: display now, echo later after timeout */
+                if (got_crlf && !echo_armed) {
+                    echo_armed = true;
                     if (prompt_active) { printf("\n"); prompt_active = false; }
 
-                    /* Determine display range (filter trailing CR/LF if needed) */
                     unsigned long display_len = total_rx;
                     if (!g_show_crlf && display_len > 0) {
                         if (rx_buf[display_len - 1] == '\n') display_len--;
                         if (display_len > 0 && rx_buf[display_len - 1] == '\r') display_len--;
                     }
 
-                    /* Display received data */
+                    print_timestamp();
+                    set_color(COLOR_GREEN);
+                    for (unsigned long i = 0; i < display_len; i++) {
+                        print_serial_char(rx_buf[i]);
+                    }
+                    set_color(COLOR_RESET);
+                    printf("\n");
+                    fflush(stdout);
+                }
+
+                /* Buffer full: display + echo immediately */
+                if (total_rx >= MAX_BUFFER_SIZE) {
+                    if (prompt_active) { printf("\n"); prompt_active = false; }
+
+                    unsigned long display_len = total_rx;
+                    if (!g_show_crlf && display_len > 0) {
+                        if (rx_buf[display_len - 1] == '\n') display_len--;
+                        if (display_len > 0 && rx_buf[display_len - 1] == '\r') display_len--;
+                    }
+
                     print_timestamp();
                     set_color(COLOR_GREEN);
                     for (unsigned long i = 0; i < display_len; i++) {
@@ -294,7 +303,6 @@ int main(int argc, char *argv[]) {
                     set_color(COLOR_RESET);
                     printf("\n");
 
-                    /* Echo back: strip trailing CR/LF, then append CR+LF */
                     unsigned long echo_len = total_rx;
                     if (echo_len > 0 && rx_buf[echo_len - 1] == '\n') echo_len--;
                     if (echo_len > 0 && rx_buf[echo_len - 1] == '\r') echo_len--;
@@ -310,9 +318,9 @@ int main(int argc, char *argv[]) {
                         printf("Sent back %ld bytes\n", w); set_color(COLOR_RESET);
                     }
 
-                    skip_lf = cr && !g_show_crlf;
                     total_rx = 0;
                     data_pending = false;
+                    echo_armed = false;
                     memset(rx_buf, 0, sizeof(rx_buf));
                     prompt_active = false;
                     fflush(stdout);
@@ -359,29 +367,12 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        /* === Timeout echo === */
-        if (data_pending &&
+        /* === Timeout echo: fires after CR/LF received + timeout_ms of silence === */
+        if (echo_armed && data_pending &&
             (get_tick_ms() - last_char_time > (unsigned long)timeout_ms)) {
-            /* Move to new line if prompt was showing */
             if (prompt_active) { printf("\n"); prompt_active = false; }
 
-            /* Determine display range */
-            unsigned long display_len = total_rx;
-            if (!g_show_crlf && display_len > 0) {
-                if (rx_buf[display_len - 1] == '\n') display_len--;
-                if (display_len > 0 && rx_buf[display_len - 1] == '\r') display_len--;
-            }
-
-            /* Display received data */
-            print_timestamp();
-            set_color(COLOR_GREEN);
-            for (unsigned long i = 0; i < display_len; i++) {
-                print_serial_char(rx_buf[i]);
-            }
-            set_color(COLOR_RESET);
-            printf("\n");
-
-            /* Echo back: strip trailing CR/LF, then append CR+LF */
+            /* Echo back (data was already displayed when CR/LF arrived) */
             unsigned long echo_len = total_rx;
             if (echo_len > 0 && rx_buf[echo_len - 1] == '\n') echo_len--;
             if (echo_len > 0 && rx_buf[echo_len - 1] == '\r') echo_len--;
@@ -399,6 +390,7 @@ int main(int argc, char *argv[]) {
 
             total_rx = 0;
             data_pending = false;
+            echo_armed = false;
             memset(rx_buf, 0, sizeof(rx_buf));
             prompt_active = false;
             fflush(stdout);
