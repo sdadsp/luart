@@ -5,7 +5,7 @@
  * displays it on screen (with special characters visible), and echoes it back
  * after a timeout period or when a CR character is received.
  *
- * Compile with GCC: gcc -Wall -Wextra -std=c11 -o luart main.c -lpthread -lm
+ * Compile with GCC: gcc -Wall -Wextra -std=c11 -o luart main.c -lm
  *
  * @author sdadsp
  */
@@ -19,11 +19,11 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <termios.h>
-#include <pthread.h>
 #include <signal.h>
 #include <errno.h>
 #include <time.h>
 #include <getopt.h>
+#include <sys/select.h>
 
 /* Default settings as macros */
 #define DEFAULT_BAUDRATE 9600
@@ -31,18 +31,45 @@
 #define DEFAULT_DATABITS 8
 #define DEFAULT_STOPBITS 1
 #define DEFAULT_TIMEOUT_MS 1000
-#define DEFAULT_ADD_CRLF 0
+#define DEFAULT_ADD_CRLF 1
 #define MAX_BUFFER_SIZE 32
 #define MAX_KEYBOARD_BUFFER 64
+
+/* ANSI color codes */
+#define COLOR_RESET   "\033[0m"
+#define COLOR_RED     "\033[31m"
+#define COLOR_GREEN   "\033[32m"
+#define COLOR_YELLOW  "\033[33m"
+#define COLOR_CYAN    "\033[36m"
+#define COLOR_MAGENTA "\033[35m"
+#define COLOR_GREY    "\033[90m"
+
+/* Global flags */
+bool g_use_color = true;
+bool g_show_timestamp = true;
+bool g_show_prompt = false;
+bool g_show_crlf = false;
 
 /* Global variable for serial port fd to allow closing in signal handler */
 int g_fd_serial = -1;
 
-/* Function prototypes */
-void print_usage(char *program_name);
-bool configure_port(int fd, int baudrate, char parity, int databits, int stopbits);
-void close_port_and_exit(int sig);
-void *keyboard_thread(void *arg);
+/* Helper: print color escape if colors are enabled */
+static inline void set_color(const char *color) {
+    if (g_use_color) printf("%s", color);
+}
+
+/* Helper: print timestamp [HH:MM:SS.mmm] in grey */
+static void print_timestamp(void) {
+    if (!g_show_timestamp) return;
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    localtime_r(&ts.tv_sec, &tm);
+    set_color(COLOR_GREY);
+    printf("[%02d:%02d:%02d.%03ld] ",
+           tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000);
+    set_color(COLOR_RESET);
+}
 
 /* Helper: get monotonic time in milliseconds */
 static unsigned long get_tick_ms(void) {
@@ -72,11 +99,37 @@ static speed_t baudrate_to_speed(int baudrate) {
     }
 }
 
-/* Structure to pass data to the keyboard thread */
-typedef struct {
-    int fd;
-    bool *running;
-} ThreadParams;
+/* Helper: display a single received character with special char formatting */
+static void print_serial_char(char c) {
+    switch (c) {
+        case '\r':
+            set_color(COLOR_YELLOW); printf("<CR>"); set_color(COLOR_GREEN);
+            break;
+        case '\n':
+            set_color(COLOR_YELLOW); printf("<LF>"); set_color(COLOR_GREEN);
+            break;
+        case '\t':
+            set_color(COLOR_YELLOW); printf("<TAB>"); set_color(COLOR_GREEN);
+            break;
+        case '\0':
+            set_color(COLOR_YELLOW); printf("<NUL>"); set_color(COLOR_GREEN);
+            break;
+        default:
+            if (c < 32 || c > 126) {
+                set_color(COLOR_MAGENTA);
+                printf("<0x%02X>", (unsigned char)c);
+                set_color(COLOR_GREEN);
+            } else {
+                printf("%c", c);
+            }
+            break;
+    }
+}
+
+/* Function prototypes */
+void print_usage(char *program_name);
+bool configure_port(int fd, int baudrate, char parity, int databits, int stopbits);
+void close_port_and_exit(int sig);
 
 int main(int argc, char *argv[]) {
     /* Serial port parameters */
@@ -88,45 +141,26 @@ int main(int argc, char *argv[]) {
     int timeout_ms = DEFAULT_TIMEOUT_MS;
     bool add_crlf = DEFAULT_ADD_CRLF;
 
-    /* Variables for serial port handling */
-    int fd;
-
-    /* Buffer for data */
-    char buffer[MAX_BUFFER_SIZE + 1] = {0}; /* +1 for null terminator */
-    ssize_t bytes_read = 0;
-
-    /* Command line options */
-    int opt;
-
     /* Set up signal handlers for clean exit */
-    signal(SIGINT, close_port_and_exit);   /* Ctrl+C */
-    signal(SIGTERM, close_port_and_exit);  /* Termination request */
+    signal(SIGINT, close_port_and_exit);
+    signal(SIGTERM, close_port_and_exit);
 
     /* Parse command line arguments */
-    while ((opt = getopt(argc, argv, "p:b:a:d:s:t:c:h")) != -1) {
+    int opt;
+    while ((opt = getopt(argc, argv, "p:b:a:d:S:t:l:c:s:i:f:h")) != -1) {
         switch (opt) {
-            case 'p': /* Port */
-                port_name = optarg;
-                break;
-            case 'b': /* Baudrate */
-                baudrate = atoi(optarg);
-                break;
-            case 'a': /* Parity */
-                parity = optarg[0];
-                break;
-            case 'd': /* Data bits */
-                databits = atoi(optarg);
-                break;
-            case 's': /* Stop bits */
-                stopbits = atoi(optarg);
-                break;
-            case 't': /* Timeout */
-                timeout_ms = atoi(optarg);
-                break;
-            case 'c': /* Add CR/LF */
-                add_crlf = atoi(optarg);
-                break;
-            case 'h': /* Help */
+            case 'p': port_name = optarg; break;
+            case 'b': baudrate = atoi(optarg); break;
+            case 'a': parity = optarg[0]; break;
+            case 'd': databits = atoi(optarg); break;
+            case 'S': stopbits = atoi(optarg); break;
+            case 't': timeout_ms = atoi(optarg); break;
+            case 'l': add_crlf = atoi(optarg); break;
+            case 'c': g_use_color = atoi(optarg); break;
+            case 's': g_show_timestamp = atoi(optarg); break;
+            case 'i': g_show_prompt = atoi(optarg); break;
+            case 'f': g_show_crlf = atoi(optarg); break;
+            case 'h':
             default:
                 print_usage(argv[0]);
                 return 0;
@@ -135,15 +169,21 @@ int main(int argc, char *argv[]) {
 
     /* Check if port is specified */
     if (port_name == NULL) {
+        print_timestamp();
+        set_color(COLOR_RED);
         printf("Error: Serial port must be specified with -p option\n");
+        set_color(COLOR_RESET);
         print_usage(argv[0]);
         return 1;
     }
 
     /* Open the serial port */
-    fd = open(port_name, O_RDWR | O_NOCTTY | O_NDELAY);
+    int fd = open(port_name, O_RDWR | O_NOCTTY | O_NDELAY);
     if (fd < 0) {
+        print_timestamp();
+        set_color(COLOR_RED);
         printf("Error opening port %s: %s\n", port_name, strerror(errno));
+        set_color(COLOR_RESET);
         return 1;
     }
 
@@ -155,145 +195,232 @@ int main(int argc, char *argv[]) {
 
     /* Configure port parameters */
     if (!configure_port(fd, baudrate, parity, databits, stopbits)) {
+        print_timestamp();
+        set_color(COLOR_RED);
         printf("Failed to configure the port. Closing and exiting.\n");
+        set_color(COLOR_RESET);
         close(fd);
         g_fd_serial = -1;
         return 1;
     }
 
-    printf("Connected to %s\n", port_name);
+    /* Startup messages */
+    print_timestamp(); set_color(COLOR_YELLOW);
+    printf("Connected to %s\n", port_name); set_color(COLOR_RESET);
+    print_timestamp(); set_color(COLOR_YELLOW);
     printf("Baudrate: %d, Parity: %c, Data bits: %d, Stop bits: %d\n",
-           baudrate, parity, databits, stopbits);
+           baudrate, parity, databits, stopbits); set_color(COLOR_RESET);
+    print_timestamp(); set_color(COLOR_YELLOW);
     printf("Timeout: %d ms, Add CR/LF: %s\n",
-           timeout_ms, add_crlf ? "Yes" : "No");
-    printf("Waiting for data...\n");
+           timeout_ms, add_crlf ? "Yes" : "No"); set_color(COLOR_RESET);
+    print_timestamp(); set_color(COLOR_YELLOW);
+    printf("Waiting for data...\n"); set_color(COLOR_RESET);
+    print_timestamp(); set_color(COLOR_YELLOW);
     printf("Type data and press Enter to send. Max %d bytes.\n", MAX_KEYBOARD_BUFFER - 1);
+    set_color(COLOR_RESET);
 
-    /* Flag to control threads */
+    /* Main loop state */
+    char rx_buf[MAX_BUFFER_SIZE + 1] = {0};
+    unsigned long total_rx = 0;
+    bool data_pending = false;
+    unsigned long last_char_time = 0;
+    bool prompt_active = false;
+    bool skip_lf = false;
     bool running = true;
 
-    /* Create thread for keyboard input */
-    ThreadParams params = { fd, &running };
-    pthread_t kb_thread;
-    if (pthread_create(&kb_thread, NULL, keyboard_thread, &params) != 0) {
-        printf("Error creating keyboard thread\n");
-        close(fd);
-        g_fd_serial = -1;
-        return 1;
-    }
-
-    /* Main loop */
-    bool data_pending = false;
-    unsigned long total_bytes_read = 0;
-    unsigned long last_char_time = 0;
-
     while (running) {
-        /* Read data from serial port */
-        bytes_read = read(fd, buffer + total_bytes_read, MAX_BUFFER_SIZE - total_bytes_read);
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        FD_SET(STDIN_FILENO, &rfds);
 
-        if (bytes_read > 0) {
-            /* We received some data */
-            data_pending = true;
-            last_char_time = get_tick_ms();
+        struct timeval tv = { .tv_sec = 0, .tv_usec = 50000 }; /* 50ms */
+        int maxfd = (fd > STDIN_FILENO) ? fd : STDIN_FILENO;
+        int ret = select(maxfd + 1, &rfds, NULL, NULL, &tv);
 
-            /* Check for CR character */
-            bool cr_received = false;
-            for (unsigned long i = total_bytes_read; i < total_bytes_read + (unsigned long)bytes_read; i++) {
-                if (buffer[i] == '\r') {
-                    cr_received = true;
-                    break;
-                }
-            }
-
-            /* Update total bytes received */
-            total_bytes_read += (unsigned long)bytes_read;
-
-            /* Null terminate the string */
-            buffer[total_bytes_read] = '\0';
-
-            /* Display received data with special characters visible */
-            for (unsigned long i = total_bytes_read - (unsigned long)bytes_read; i < total_bytes_read; i++) {
-                char c = buffer[i];
-                switch (c) {
-                    case '\r':
-                        printf("<CR>");
-                        break;
-                    case '\n':
-                        printf("<LF>");
-                        break;
-                    case '\t':
-                        printf("<TAB>");
-                        break;
-                    case '\0':
-                        printf("<NUL>");
-                        break;
-                    default:
-                        if (c < 32 || c > 126) {
-                            /* Non-printable character */
-                            printf("<0x%02X>", (unsigned char)c);
-                        } else {
-                            /* Regular printable character */
-                            printf("%c", c);
-                        }
-                        break;
-                }
-            }
-            fflush(stdout);
-
-            /* If CR was received, send immediately */
-            if (cr_received) {
-                /* Add CR LF to screen output */
-                printf("\r\n");
-
-                ssize_t bytes_written = write(fd, buffer, total_bytes_read);
-                if (bytes_written < 0) {
-                    printf("\nError writing to port\n");
-                } else if (bytes_written > 0) {
-                    printf("Sent back %ld bytes\r\n", bytes_written);
-                }
-
-                /* Reset for the next data */
-                data_pending = false;
-                total_bytes_read = 0;
-                memset(buffer, 0, sizeof(buffer));
-                continue;
-            }
-        } else if (bytes_read < 0 && errno != EAGAIN) {
-            printf("Error reading from port: %s\n", strerror(errno));
-            running = false;
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            print_timestamp(); set_color(COLOR_RED);
+            printf("select() error: %s\n", strerror(errno));
+            set_color(COLOR_RESET);
             break;
         }
 
-        /* Check if we need to send data back */
-        if (data_pending &&
-            (get_tick_ms() - last_char_time > (unsigned long)timeout_ms || total_bytes_read >= MAX_BUFFER_SIZE)) {
-            /* Always add CR LF after timeout */
-            printf("\r\n");
+        /* === Serial port data === */
+        if (ret > 0 && FD_ISSET(fd, &rfds)) {
+            ssize_t n = read(fd, rx_buf + total_rx, MAX_BUFFER_SIZE - total_rx);
 
-            /* Timeout occurred or buffer is full - send the data back */
-            ssize_t bytes_written = write(fd, buffer, total_bytes_read);
-            if (bytes_written < 0) {
-                printf("\nError writing to port\n");
-            } else if (bytes_written > 0) {
-                printf("Sent back %ld bytes\r\n", bytes_written);
+            if (n > 0) {
+                /* Skip lone LF after CR-triggered echo */
+                if (skip_lf) {
+                    skip_lf = false;
+                    if (rx_buf[total_rx] == '\n') {
+                        if (n > 1) {
+                            memmove(rx_buf + total_rx, rx_buf + total_rx + 1, n - 1);
+                        }
+                        n--;
+                    }
+                    if (n <= 0) continue;
+                }
+
+                /* Check for CR */
+                bool cr = false;
+                for (ssize_t i = 0; i < n; i++) {
+                    if (rx_buf[total_rx + i] == '\r') { cr = true; break; }
+                }
+
+                total_rx += (unsigned long)n;
+                data_pending = true;
+                last_char_time = get_tick_ms();
+
+                /* On CR or buffer full: display + echo immediately */
+                if (cr || total_rx >= MAX_BUFFER_SIZE) {
+                    /* Move to new line if prompt was showing */
+                    if (prompt_active) { printf("\n"); prompt_active = false; }
+
+                    /* Determine display range (filter trailing CR/LF if needed) */
+                    unsigned long display_len = total_rx;
+                    if (!g_show_crlf && display_len > 0) {
+                        if (rx_buf[display_len - 1] == '\n') display_len--;
+                        if (display_len > 0 && rx_buf[display_len - 1] == '\r') display_len--;
+                    }
+
+                    /* Display received data */
+                    print_timestamp();
+                    set_color(COLOR_GREEN);
+                    for (unsigned long i = 0; i < display_len; i++) {
+                        print_serial_char(rx_buf[i]);
+                    }
+                    set_color(COLOR_RESET);
+                    printf("\n");
+
+                    /* Echo back: strip trailing CR/LF, then append CR+LF */
+                    unsigned long echo_len = total_rx;
+                    if (echo_len > 0 && rx_buf[echo_len - 1] == '\n') echo_len--;
+                    if (echo_len > 0 && rx_buf[echo_len - 1] == '\r') echo_len--;
+                    rx_buf[echo_len] = '\r';
+                    rx_buf[echo_len + 1] = '\n';
+                    echo_len += 2;
+                    ssize_t w = write(fd, rx_buf, echo_len);
+                    if (w < 0) {
+                        print_timestamp(); set_color(COLOR_RED);
+                        printf("Error writing to port\n"); set_color(COLOR_RESET);
+                    } else if (w > 0) {
+                        print_timestamp(); set_color(COLOR_YELLOW);
+                        printf("Sent back %ld bytes\n", w); set_color(COLOR_RESET);
+                    }
+
+                    skip_lf = cr && !g_show_crlf;
+                    total_rx = 0;
+                    data_pending = false;
+                    memset(rx_buf, 0, sizeof(rx_buf));
+                    prompt_active = false;
+                    fflush(stdout);
+                }
+
+            } else if (n < 0 && errno != EAGAIN) {
+                print_timestamp(); set_color(COLOR_RED);
+                printf("Error reading from port: %s\n", strerror(errno));
+                set_color(COLOR_RESET);
+                running = false;
             }
-
-            /* Reset for the next data */
-            data_pending = false;
-            total_bytes_read = 0;
-            memset(buffer, 0, sizeof(buffer));
         }
 
-        /* Small delay to prevent CPU hogging */
-        usleep(10000);
+        /* === Keyboard input === */
+        if (ret > 0 && FD_ISSET(STDIN_FILENO, &rfds)) {
+            char kb_buf[MAX_KEYBOARD_BUFFER];
+            ssize_t n = read(STDIN_FILENO, kb_buf, MAX_KEYBOARD_BUFFER - 3);
+
+            if (n > 0) {
+                prompt_active = false;
+                set_color(COLOR_RESET);
+
+                /* Remove trailing newline */
+                if (kb_buf[n - 1] == '\n') n--;
+
+                if (n > 0) {
+                    /* Add CR+LF */
+                    kb_buf[n] = '\r';
+                    kb_buf[n + 1] = '\n';
+                    n += 2;
+
+                    ssize_t w = write(fd, kb_buf, n);
+                    if (w < 0) {
+                        print_timestamp(); set_color(COLOR_RED);
+                        printf("Error writing to port\n"); set_color(COLOR_RESET);
+                    } else {
+                        print_timestamp(); set_color(COLOR_YELLOW);
+                        printf("Sent\n"); set_color(COLOR_RESET);
+                    }
+                }
+                fflush(stdout);
+            } else if (n == 0) {
+                running = false;
+            }
+        }
+
+        /* === Timeout echo === */
+        if (data_pending &&
+            (get_tick_ms() - last_char_time > (unsigned long)timeout_ms)) {
+            /* Move to new line if prompt was showing */
+            if (prompt_active) { printf("\n"); prompt_active = false; }
+
+            /* Determine display range */
+            unsigned long display_len = total_rx;
+            if (!g_show_crlf && display_len > 0) {
+                if (rx_buf[display_len - 1] == '\n') display_len--;
+                if (display_len > 0 && rx_buf[display_len - 1] == '\r') display_len--;
+            }
+
+            /* Display received data */
+            print_timestamp();
+            set_color(COLOR_GREEN);
+            for (unsigned long i = 0; i < display_len; i++) {
+                print_serial_char(rx_buf[i]);
+            }
+            set_color(COLOR_RESET);
+            printf("\n");
+
+            /* Echo back: strip trailing CR/LF, then append CR+LF */
+            unsigned long echo_len = total_rx;
+            if (echo_len > 0 && rx_buf[echo_len - 1] == '\n') echo_len--;
+            if (echo_len > 0 && rx_buf[echo_len - 1] == '\r') echo_len--;
+            rx_buf[echo_len] = '\r';
+            rx_buf[echo_len + 1] = '\n';
+            echo_len += 2;
+            ssize_t w = write(fd, rx_buf, echo_len);
+            if (w < 0) {
+                print_timestamp(); set_color(COLOR_RED);
+                printf("Error writing to port\n"); set_color(COLOR_RESET);
+            } else if (w > 0) {
+                print_timestamp(); set_color(COLOR_YELLOW);
+                printf("Sent back %ld bytes\n", w); set_color(COLOR_RESET);
+            }
+
+            total_rx = 0;
+            data_pending = false;
+            memset(rx_buf, 0, sizeof(rx_buf));
+            prompt_active = false;
+            fflush(stdout);
+        }
+
+        /* === Show prompt when idle === */
+        if (!data_pending && !prompt_active) {
+            if (g_show_prompt) {
+                print_timestamp(); set_color(COLOR_YELLOW);
+                printf("> ");
+            }
+            set_color(COLOR_CYAN);
+            fflush(stdout);
+            prompt_active = true;
+        }
     }
 
-    /* Signal thread to stop and wait for it */
-    running = false;
-    pthread_join(kb_thread, NULL);
-
-    /* Close the serial port */
-    printf("Closing serial port and exiting...\n");
+    /* Cleanup */
+    set_color(COLOR_RESET);
+    printf("\n");
+    print_timestamp(); set_color(COLOR_YELLOW);
+    printf("Closing serial port and exiting...\n"); set_color(COLOR_RESET);
     if (fd >= 0) {
         close(fd);
         g_fd_serial = -1;
@@ -304,76 +431,20 @@ int main(int argc, char *argv[]) {
 
 /**
  * Signal handler for clean exit
- * This function will be called when the program receives termination signals
  */
 void close_port_and_exit(int sig) {
-    printf("\nReceived termination signal (%d). Closing serial port and exiting...\n", sig);
+    printf("\n");
+    print_timestamp();
+    set_color(COLOR_YELLOW);
+    printf("Received termination signal (%d). Closing serial port and exiting...\n", sig);
+    set_color(COLOR_RESET);
 
-    /* Close serial port if it's open */
     if (g_fd_serial >= 0) {
         close(g_fd_serial);
         g_fd_serial = -1;
     }
 
-    /* Exit program */
     exit(0);
-}
-
-/**
- * Thread function for handling keyboard input
- */
-void *keyboard_thread(void *arg) {
-    ThreadParams *params = (ThreadParams *)arg;
-    int fd = params->fd;
-    bool *running = params->running;
-
-    char input_buffer[MAX_KEYBOARD_BUFFER];
-
-    while (*running) {
-        /* Print prompt */
-        printf("Send> ");
-        fflush(stdout);
-
-        /* Read a line from keyboard */
-        if (fgets(input_buffer, MAX_KEYBOARD_BUFFER, stdin) == NULL) {
-            /* Error or EOF */
-            break;
-        }
-
-        /* Remove trailing newline if present */
-        size_t len = strlen(input_buffer);
-        if (len > 0 && input_buffer[len-1] == '\n') {
-            input_buffer[len-1] = '\0';
-            len--;
-        }
-
-        /* Skip if empty */
-        if (len == 0) {
-            continue;
-        }
-
-        /* Add CR+LF to the end of the line */
-        if (len < MAX_KEYBOARD_BUFFER - 2) {
-            input_buffer[len] = '\r';
-            input_buffer[len+1] = '\n';
-            len += 2;
-        } else {
-            /* Buffer is too full for both CR and LF, add just CR */
-            input_buffer[MAX_KEYBOARD_BUFFER-2] = '\r';
-            len = MAX_KEYBOARD_BUFFER-1;
-        }
-
-        /* Send data to serial port */
-        ssize_t bytes_written = write(fd, input_buffer, len);
-        if (bytes_written < 0) {
-            printf("\nError writing to port\n");
-            continue;
-        }
-
-        printf("Sent %ld bytes\r\n", bytes_written);
-    }
-
-    return NULL;
 }
 
 /**
@@ -386,9 +457,13 @@ void print_usage(char *program_name) {
     printf("  -b RATE     Baudrate (default: %d)\n", DEFAULT_BAUDRATE);
     printf("  -a PARITY   Parity (N=none, E=even, O=odd, default: %c)\n", DEFAULT_PARITY);
     printf("  -d DATABITS Data bits (7 or 8, default: %d)\n", DEFAULT_DATABITS);
-    printf("  -s STOPBITS Stop bits (1 or 2, default: %d)\n", DEFAULT_STOPBITS);
+    printf("  -S STOPBITS Stop bits (1 or 2, default: %d)\n", DEFAULT_STOPBITS);
     printf("  -t TIMEOUT  Timeout before echo in milliseconds (default: %d)\n", DEFAULT_TIMEOUT_MS);
-    printf("  -c CRLF     Add CR/LF to output (0=no, 1=yes, default: %d)\n", DEFAULT_ADD_CRLF);
+    printf("  -l CRLF     Add CR/LF to output (0=no, 1=yes, default: %d)\n", DEFAULT_ADD_CRLF);
+    printf("  -c COLOR    Colored output (0=off, 1=on, default: 1)\n");
+    printf("  -s STAMP    Timestamp on lines (0=off, 1=on, default: 1)\n");
+    printf("  -i INPUT    Show input prompt > (0=off, 1=on, default: 0)\n");
+    printf("  -f CRLF     Show trailing <CR><LF> in received data (0=off, 1=on, default: 0)\n");
     printf("  -h          Display this help message\n");
 }
 
@@ -398,13 +473,12 @@ void print_usage(char *program_name) {
 bool configure_port(int fd, int baudrate, char parity, int databits, int stopbits) {
     struct termios tty;
 
-    /* Get current settings */
     if (tcgetattr(fd, &tty) != 0) {
         printf("Error getting current serial parameters: %s\n", strerror(errno));
         return false;
     }
 
-    /* Set raw mode as baseline (no echo, no canonical processing, no signals) */
+    /* Set raw mode as baseline */
     cfmakeraw(&tty);
 
     /* Set baudrate */
@@ -422,26 +496,11 @@ bool configure_port(int fd, int baudrate, char parity, int databits, int stopbit
     /* Set parity */
     tty.c_cflag &= ~(PARENB | PARODD);
     switch (parity) {
-        case 'N':
-        case 'n':
-            /* No parity - already cleared above */
-            break;
-        case 'E':
-        case 'e':
-            tty.c_cflag |= PARENB;
-            break;
-        case 'O':
-        case 'o':
-            tty.c_cflag |= (PARENB | PARODD);
-            break;
-        case 'M':
-        case 'm':
-            tty.c_cflag |= (PARENB | PARODD | CMSPAR);
-            break;
-        case 'S':
-        case 's':
-            tty.c_cflag |= (PARENB | CMSPAR);
-            break;
+        case 'N': case 'n': break;
+        case 'E': case 'e': tty.c_cflag |= PARENB; break;
+        case 'O': case 'o': tty.c_cflag |= (PARENB | PARODD); break;
+        case 'M': case 'm': tty.c_cflag |= (PARENB | PARODD | CMSPAR); break;
+        case 'S': case 's': tty.c_cflag |= (PARENB | CMSPAR); break;
         default:
             printf("Invalid parity setting: %c\n", parity);
             return false;
@@ -461,51 +520,25 @@ bool configure_port(int fd, int baudrate, char parity, int databits, int stopbit
 
     /* Set stop bits */
     tty.c_cflag &= ~CSTOPB;
-    switch (stopbits) {
-        case 1:
-            /* 1 stop bit - CSTOPB already cleared */
-            break;
-        case 2:
-            tty.c_cflag |= CSTOPB;
-            break;
-        default:
-            printf("Invalid stop bits: %d (must be 1 or 2)\n", stopbits);
-            return false;
+    if (stopbits == 2) {
+        tty.c_cflag |= CSTOPB;
+    } else if (stopbits != 1) {
+        printf("Invalid stop bits: %d (must be 1 or 2)\n", stopbits);
+        return false;
     }
 
     /* Disable flow control */
     tty.c_cflag &= ~CRTSCTS;
     tty.c_iflag &= ~(IXON | IXOFF | IXANY);
 
-    /* Set read timeout: VMIN=0, VTIME=1 → return after 100ms if no data */
+    /* Set read timeout: VMIN=0, VTIME=1 -> return after 100ms if no data */
     tty.c_cc[VMIN] = 0;
     tty.c_cc[VTIME] = 1;
 
-    /* Apply settings */
     if (tcsetattr(fd, TCSANOW, &tty) != 0) {
         printf("Error setting serial parameters: %s\n", strerror(errno));
         return false;
     }
 
     return true;
-}
-
-/**
- * Process and display received data
- *
- * Note: This function is no longer used in the main loop due to the improved
- * timeout logic, but is kept for potential future use.
- */
-void process_received_data(char *buffer, int bytes_read, bool add_crlf) {
-    printf("Received %d bytes: ", bytes_read);
-
-    /* Display data */
-    for (int i = 0; i < bytes_read; i++) {
-        printf("%c", buffer[i]);
-    }
-
-    /* Add CR/LF if required */
-    if (add_crlf) {
-        printf("\r\n");
-    }
 }

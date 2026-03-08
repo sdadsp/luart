@@ -3,7 +3,7 @@
 # Compiler and flags
 CC = gcc
 CFLAGS = -Wall -Wextra -std=c11
-LDFLAGS = -lpthread -lm
+LDFLAGS = -lm
 
 # Target executable
 TARGET = luart

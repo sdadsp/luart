@@ -5,12 +5,12 @@ Simple command line tool for talking to serial devices on Linux. It opens a seri
 
 ## What it does
 
-When you run the program and point it at a serial port, it does two things at once. The main loop reads incoming data from the port and prints it to the screen. Any control characters that would normally be invisible get shown in a readable way, so a carriage return shows up as <CR>, a line feed as <LF>, a tab as <TAB>, a null byte as <NUL>, and anything else non-printable gets shown as its hex value like <0x1B>. After a configurable timeout with no new data, or when a carriage return arrives, the program sends all the accumulated data back out through the same port. A separate thread watches the keyboard so you can type a message at the Send prompt and press Enter to transmit it, with carriage return and line feed appended automatically.
+When you run the program and point it at a serial port, it does two things at once using a single-threaded event loop. It reads incoming data from the port and prints it to the screen. Any control characters that would normally be invisible get shown in a readable way, so a carriage return shows up as <CR>, a line feed as <LF>, a tab as <TAB>, a null byte as <NUL>, and anything else non-printable gets shown as its hex value like <0x1B>. After a configurable timeout with no new data, or when a carriage return arrives, the program sends all the accumulated data back out through the same port with CR+LF appended. You can also type messages and press Enter to transmit them, with carriage return and line feed appended automatically. Output can be colored and timestamped.
 
 
 ## Project structure
 
-The whole application lives in a single C source file. It contains everything including the main loop, port configuration, keyboard thread, signal handler, and helper functions.
+The whole application lives in a single C source file. It contains everything including the main loop, port configuration, signal handler, and helper functions.
 
 Makefile is the build script for GCC on Linux. Running make produces the luart binary.
 
@@ -35,7 +35,7 @@ To remove the compiled files and start fresh:
 
 Compiling manually:
 
-    gcc -Wall -Wextra -std=c11 -o luart main.c -lpthread -lm
+    gcc -Wall -Wextra -std=c11 -o luart main.c -lm
 
 
 ## Program options
@@ -56,13 +56,21 @@ The only required option is the port name. Everything else has sensible defaults
 
     -d DATABITS   Number of data bits. Can be 5, 6, 7, or 8. Default is 8.
 
-    -s STOPBITS   Number of stop bits. Can be 1 or 2. Default is 1.
+    -S STOPBITS   Number of stop bits. Can be 1 or 2. Default is 1.
 
     -t TIMEOUT    How long to wait in milliseconds after the last received character
                   before echoing everything back. Default is 1000.
 
-    -c CRLF       Whether to add carriage return and line feed to output.
-                  0 for no, 1 for yes. Default is 0.
+    -l CRLF       Add CR+LF to echo output. 0 for no, 1 for yes. Default is 1.
+
+    -c COLOR      Colored output. 0 for off, 1 for on. Default is 1.
+
+    -s STAMP      Timestamp on each output line. 0 for off, 1 for on. Default is 1.
+
+    -i INPUT      Show input prompt. 0 for off, 1 for on. Default is 0.
+
+    -f CRLF       Show trailing CR+LF markers in received data. 0 for off, 1 for on.
+                  Default is 0.
 
     -h            Show the help message and exit.
 
@@ -91,7 +99,7 @@ For a faster connection with even parity
 
 For a connection with 2 stop bits and a shorter echo timeout of half a second
 
-    ./luart -p /dev/ttyACM0 -s 2 -t 500
+    ./luart -p /dev/ttyACM0 -S 2 -t 500
 
 While the program is running, anything received on the serial port gets printed to the screen immediately. The echo timer resets every time a new character arrives. When the timeout expires or a carriage return comes in or the 32 byte receive buffer fills up, all the accumulated data gets sent back out through the port.
 
