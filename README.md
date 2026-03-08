@@ -75,6 +75,10 @@ The only required option is the port name. Everything else has sensible defaults
     -h            Show the help message and exit.
 
 
+## Example output
+
+ ![Example output](app_screenshot1.png)
+
 ## Usage tips
 
 Before running the program, make sure you have permission to access the serial port. On most systems your user needs to be in the dialout group
