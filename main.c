@@ -1,11 +1,16 @@
 /**
- * Serial Port Communication Application
+ * @file main.c
+ * @brief Serial port communication tool with auto-echo.
  *
- * This application connects to a specified serial port, receives data,
- * displays it on screen (with special characters visible), and echoes it back
- * after a timeout period or when a CR character is received.
+ * Connects to a serial port, displays received data with special characters
+ * spelled out (<CR>, <LF>, <0xNN>, etc.), and echoes accumulated data back
+ * after a configurable timeout or on CR/LF. Keyboard input can also be sent
+ * through the port. Uses a single-threaded select() event loop.
  *
- * Compile with GCC: gcc -Wall -Wextra -std=c11 -o luart main.c -lm
+ * Supports colored output, timestamps, configurable baud rate, parity,
+ * data bits, stop bits, and echo behavior.
+ *
+ * Compile: gcc -Wall -Wextra -std=c11 -o luart main.c -lm
  *
  * @author sdadsp
  */
