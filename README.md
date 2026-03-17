@@ -105,6 +105,10 @@ For a connection with 2 stop bits and a shorter echo timeout of half a second
 
     ./luart -p /dev/ttyACM0 -S 2 -t 500
 
+For a 9600 8N1 connection with the input prompt '>' and echo timeout 800ms
+
+    ./luart -p /dev/ttyUSB0 -i 1 -t 800
+
 While the program is running, anything received on the serial port gets printed to the screen immediately. The echo timer resets every time a new character arrives. When the timeout expires or a carriage return comes in or the 32 byte receive buffer fills up, all the accumulated data gets sent back out through the port.
 
 To send data from the keyboard, type your message at the Send prompt and press Enter. The program automatically adds a carriage return and line feed to the end of whatever you type before sending it.
